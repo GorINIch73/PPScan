@@ -1,0 +1,19 @@
+{
+  "appId": "com.ppscan.app",
+  "appName": "PPScan",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "minSdk": 26,
+    "targetSdk": 34,
+    "allowMixedContent": true
+  },
+  "plugins": {
+    "Camera": {
+      "promptLabelPhoto": "Выбрать фото",
+      "promptLabelPicture": "Сделать снимок"
+    }
+  }
+}

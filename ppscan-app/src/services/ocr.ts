@@ -1,0 +1,494 @@
+import Tesseract from 'tesseract.js';
+import type { PaymentFields } from '@/types';
+import { emptyFields } from '@/types';
+
+export interface OCRProgress {
+  status: string;
+  progress: number;
+}
+
+export class OCRService {
+  private worker: Tesseract.Worker | null = null;
+
+  async initialize(): Promise<void> {
+    if (this.worker) return;
+    
+    this.worker = await Tesseract.createWorker('rus', 1, {
+      logger: (m) => console.log('Tesseract:', m.status, Math.round(m.progress * 100) + '%')
+    });
+  }
+
+  async recognize(
+    imageData: string,
+    onProgress?: (progress: OCRProgress) => void
+  ): Promise<{ text: string; confidence: number; fields: Partial<PaymentFields> }> {
+    if (!this.worker) {
+      await this.initialize();
+    }
+
+    onProgress?.({ status: 'Улучшение изображения...', progress: 10 });
+    
+    const processedImage = await this.preprocessImage(imageData);
+
+    onProgress?.({ status: 'Распознавание текста...', progress: 30 });
+
+    const result = await this.worker!.recognize(processedImage, {}, {
+      text: true
+    });
+
+    const text = result.data.text;
+    const confidence = result.data.confidence;
+
+    onProgress?.({ status: 'Извлечение реквизитов...', progress: 95 });
+
+    const fields = this.extractFields(text);
+
+    return { text, confidence, fields };
+  }
+
+  private async preprocessImage(imageData: string): Promise<string> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d')!;
+        
+        let width = img.width;
+        let height = img.height;
+        
+        const maxDimension = 2000;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round(height * maxDimension / width);
+            width = maxDimension;
+          } else {
+            width = Math.round(width * maxDimension / height);
+            height = maxDimension;
+          }
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        const imageData_obj = ctx.getImageData(0, 0, width, height);
+        const data = imageData_obj.data;
+        
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          
+          const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+          
+          let adjusted = gray;
+          if (gray < 128) {
+            adjusted = Math.max(0, gray - 30);
+          } else {
+            adjusted = Math.min(255, gray + 20);
+          }
+          
+          const contrast = 1.3;
+          adjusted = ((adjusted - 128) * contrast) + 128;
+          adjusted = Math.max(0, Math.min(255, adjusted));
+          
+          data[i] = data[i + 1] = data[i + 2] = adjusted;
+        }
+        
+        ctx.putImageData(imageData_obj, 0, 0);
+        
+        resolve(canvas.toDataURL('image/jpeg', 0.9));
+      };
+      img.src = imageData;
+    });
+  }
+
+  private extractFields(text: string): Partial<PaymentFields> {
+    const fields: Partial<PaymentFields> = { ...emptyFields };
+
+    const cleanedText = this.cleanOCRText(text);
+    console.log('=== RAW OCR TEXT ===');
+    console.log(text.substring(0, 3000));
+    console.log('=== CLEANED TEXT ===');
+    console.log(cleanedText.substring(0, 3000));
+
+    // Извлекаем из всего текста (до разделения на блоки)
+    fields.number = this.extractPaymentNumber(cleanedText) || '';
+    fields.date = this.extractDate(cleanedText) || '';
+    fields.amount = this.extractAmount(cleanedText) || '';
+    fields.amountRub = this.extractAmountWords(cleanedText) || '';
+    fields.paymentPurpose = this.extractPaymentPurpose(text) || '';
+    fields.уин = this.extractUIN(cleanedText) || '';
+    fields.очередность = this.extractQueue(cleanedText) || '';
+
+    // Разделяем на блоки для плательщика и получателя
+    const payerData = this.extractPayerData(cleanedText);
+    const recipientData = this.extractRecipientData(cleanedText);
+
+    fields.payerInn = payerData.inn;
+    fields.payerKpp = payerData.kpp;
+    fields.payerAccount = payerData.account;
+    fields.payer = payerData.name;
+    fields.payerBank = payerData.bank;
+    fields.payerBik = payerData.bik;
+
+    fields.recipientInn = recipientData.inn;
+    fields.recipientKpp = recipientData.kpp;
+    fields.recipientAccount = recipientData.account;
+    fields.recipient = recipientData.name;
+    fields.recipientBank = recipientData.bank;
+    fields.recipientBik = recipientData.bik;
+
+    console.log('Payer:', JSON.stringify(payerData));
+    console.log('Recipient:', JSON.stringify(recipientData));
+
+    return fields;
+  }
+
+  private cleanOCRText(text: string): string {
+    let cleaned = text
+      .replace(/[|]/g, ' ')
+      .replace(/[━─_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/[«»„""'']/g, '"')
+      .replace(/[oO](?=\d{20})/g, '0')
+      .replace(/l(?=\d)/g, '1')
+      .trim();
+    
+    return cleaned;
+  }
+
+  private extractPaymentNumber(text: string): string | null {
+    const patterns = [
+      /(?:ПОРУЧЕНИЕ)[^\d]*(\d+)/i,
+      /(?:поручение)[^\d]*(\d+)/i,
+      /ПОРУ\s*ЧЕНИ[ЕЯ][^\d]*(\d+)/i,
+      /[№N]\s*(\d+)/,
+      /(?:номер|no)\s*[:.]?\s*(\d{4,8})/i,
+      /(?:№)\s*(\d{1,8})/
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        console.log('Found number with pattern:', pattern, '->', match[1]);
+        return match[1];
+      }
+    }
+    return null;
+  }
+
+  private extractDate(text: string): string | null {
+    const patterns = [
+      /(\d{2})\.(\d{2})\.(\d{4})/,
+      /(\d{2})\.(\d{2})\.(\d{2})(?!\d)/,
+      /(\d{2})\/(\d{2})\/(\d{4})/,
+      /(?:от\s*)?(\d{2})[\.\/](\d{2})[\.\/](\d{2,4})/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        let day = match[1];
+        let month = match[2];
+        let year = match[3];
+        if (year.length === 2) year = '20' + year;
+        console.log('Found date with pattern:', pattern, '->', `${day}.${month}.${year}`);
+        return `${day}.${month}.${year}`;
+      }
+    }
+    return null;
+  }
+
+  private extractAmount(text: string): string | null {
+    // Сначала ищем сумму в начале текста (до блока плательщика)
+    const lines = text.split('\n');
+    const headerEndIndex = lines.findIndex(l => 
+      l.toLowerCase().includes('плательщик') || 
+      l.toLowerCase().includes('получатель')
+    );
+    
+    const headerLines = headerEndIndex > 0 ? lines.slice(0, headerEndIndex) : lines.slice(0, 10);
+    const headerText = headerLines.join('\n');
+    
+    // Ищем сумму в заголовке
+    const headerAmountMatch = headerText.match(/(?:сумма|итого)[^\d]*(\d{1,12}(?:\s\d{3})*)[=,\.](\d{2})/i);
+    if (headerAmountMatch) {
+      const num = parseInt(headerAmountMatch[1].replace(/\s/g, ''));
+      const kopeks = headerAmountMatch[2];
+      console.log('Found amount in header:', num.toLocaleString('ru-RU') + ',' + kopeks);
+      return num.toLocaleString('ru-RU') + ',' + kopeks.padStart(2, '0');
+    }
+    
+    // Если не нашли, ищем сумму в формате XXXXXX= или XXXXXX=XX
+    const eqAmountMatch = headerText.match(/(\d{1,12})[=](\d{2})/);
+    if (eqAmountMatch) {
+      const num = parseInt(eqAmountMatch[1]);
+      if (num >= 100) {
+        console.log('Found amount with =:', num.toLocaleString('ru-RU') + ',' + eqAmountMatch[2]);
+        return num.toLocaleString('ru-RU') + ',' + eqAmountMatch[2].padStart(2, '0');
+      }
+    }
+    
+    // Fallback: ищем все суммы и берем самую большую
+    const allAmounts: { num: number; formatted: string }[] = [];
+    const amountMatches = text.matchAll(/(\d{1,12}(?:\s\d{3})*)[,\.](\d{2})/g);
+    for (const match of amountMatches) {
+      const amountStr = match[1].replace(/\s/g, '');
+      const kopeks = match[2];
+      const num = parseInt(amountStr);
+      if (num >= 100 && num <= 100000000000) {
+        allAmounts.push({ 
+          num, 
+          formatted: num.toLocaleString('ru-RU') + ',' + kopeks.padStart(2, '0') 
+        });
+      }
+    }
+    
+    if (allAmounts.length > 0) {
+      const maxAmount = allAmounts.reduce((max, curr) => curr.num > max.num ? curr : max);
+      console.log('Found max amount:', maxAmount.formatted);
+      return maxAmount.formatted;
+    }
+    
+    return null;
+  }
+
+  private extractAmountWords(text: string): string | null {
+    const match = text.match(/(?:рубл(?:ей|я)\s*\d*\s*коп(?:еек|ей)?[^\d]*\d+)/gi);
+    if (match) return match.join(' ').trim().substring(0, 200);
+    
+    const wordsOnly = text.match(/([а-яА-ЯёЁ]+(?:рубл|коп)[а-яА-ЯёЁ]*)+/gi);
+    if (wordsOnly) return wordsOnly.join(' ').trim().substring(0, 200);
+    return null;
+  }
+
+  private extractPayerData(text: string): { inn: string; kpp: string; account: string; name: string; bank: string; bik: string } {
+    const result = { inn: '', kpp: '', account: '', name: '', bank: '', bik: '' };
+    
+    const payerStartIndex = text.toLowerCase().indexOf('плательщик');
+    const recipientStartIndex = text.toLowerCase().indexOf('получатель');
+    
+    const beforePayer = text.substring(0, payerStartIndex >= 0 ? payerStartIndex : text.length);
+    const betweenSections = text.substring(payerStartIndex >= 0 ? payerStartIndex : 0, recipientStartIndex >= 0 ? recipientStartIndex : text.length);
+    
+    console.log('=== BEFORE PAYER ===');
+    console.log(beforePayer);
+    console.log('=== BETWEEN SECTIONS ===');
+    console.log(betweenSections);
+    
+    // ИНН - берём из "до" секции
+    const allInns = [...beforePayer.matchAll(/инн[^\d]*(\d{10,13})/gi)];
+    if (allInns.length > 0) result.inn = allInns[0][1];
+    
+    // КПП
+    const kppMatch = beforePayer.match(/кпп[^\d]*(\d{9})/i);
+    if (kppMatch) result.kpp = kppMatch[1];
+    
+    // ООО - с кавычками
+    const oooMatch = beforePayer.match(/ооо[^\w"]*"([^"]+)"/i);
+    if (oooMatch) result.name = 'ООО "' + oooMatch[1].trim() + '"';
+    
+    // АО, ЗАО
+    if (!result.name) {
+      const aoMatch = beforePayer.match(/зао[^\w"]*"([^"]+)"/i);
+      if (aoMatch) result.name = 'ЗАО "' + aoMatch[1].trim() + '"';
+    }
+    if (!result.name) {
+      const aoMatch = beforePayer.match(/ао[^\w"]*"([^"]+)"/i);
+      if (aoMatch) result.name = 'АО "' + aoMatch[1].trim() + '"';
+    }
+    
+    // Счёт
+    const accountMatch = beforePayer.match(/сч[.\s]*№?\s*(\d{20})/i);
+    if (accountMatch) result.account = accountMatch[1];
+    
+    // БИК - ищем везде, с учётом артефактов OCR [Бик [
+    const allBiks = [...text.matchAll(/бик[^\d]*[\[]?\s*(\d{9})/gi)];
+    console.log('BIK matches:', allBiks.map(m => m[1]));
+    if (allBiks.length > 0) result.bik = allBiks[0][1];
+    
+    // Банк
+    const bankMatch = text.match(/(?:пао\s+)?сбербанк/i);
+    if (bankMatch) result.bank = 'ПАО Сбербанк';
+    
+    console.log('Payer extracted:', JSON.stringify(result));
+    return result;
+  }
+
+  private extractRecipientData(text: string): { inn: string; kpp: string; account: string; name: string; bank: string; bik: string } {
+    const result = { inn: '', kpp: '', account: '', name: '', bank: '', bik: '' };
+    
+    const payerStartIndex = text.toLowerCase().indexOf('плательщик');
+    const recipientStartIndex = text.toLowerCase().indexOf('получатель');
+    
+    // Данные получателя между "Плательщик" и "Получатель"
+    let recipientText = '';
+    if (payerStartIndex >= 0 && recipientStartIndex >= 0) {
+      recipientText = text.substring(payerStartIndex, recipientStartIndex);
+    } else if (recipientStartIndex >= 0) {
+      recipientText = text.substring(0, recipientStartIndex);
+    }
+    
+    console.log('=== RECIPIENT SECTION ===');
+    console.log(recipientText);
+    
+    // ИНН - ищем все и берём последний
+    const allInns = [...recipientText.matchAll(/инн[^\d]*(\d{10,13})/gi)];
+    console.log('INNs found:', allInns.map(m => m[1]));
+    if (allInns.length > 0) result.inn = allInns[allInns.length - 1][1];
+    
+    // КПП
+    const kppMatch = recipientText.match(/кпп[^\d]*(\d{9})/i);
+    if (kppMatch) result.kpp = kppMatch[1];
+    
+    // ИП - ищем ФИО на нескольких строках
+    const ipIndex = recipientText.toLowerCase().indexOf('индивидуальный предприниматель');
+    if (ipIndex >= 0) {
+      // Ищем ФИО ПОСЛЕ "Индивидуальный Предприниматель" (3+ слова с заглавной буквы)
+      const afterIp = recipientText.substring(ipIndex);
+      const fioMatch = afterIp.match(/индивидуальный\s+предприниматель\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){2,})/i);
+      if (fioMatch) {
+        const fio = fioMatch[1].trim();
+        result.name = 'ИП ' + fio;
+        console.log('Found IP:', result.name);
+      } else {
+        // Fallback: ищем любые 3 слова с заглавной буквы после ИП
+        const simpleFioMatch = afterIp.match(/(?:ип\s+)?([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,}){2,})/);
+        if (simpleFioMatch) {
+          result.name = 'ИП ' + simpleFioMatch[1].trim();
+          console.log('Found IP (fallback):', result.name);
+        }
+      }
+    }
+    
+    // Счёт (20-21 цифра)
+    const accountMatch = recipientText.match(/сч[.\s]*№?\s*(\d{20,21})/i);
+    if (accountMatch) result.account = accountMatch[1];
+    
+    // БИК - ищем в секции получателя
+    const allBiks = [...recipientText.matchAll(/бик[^\d]*[\[]?\s*(\d{9})/gi)];
+    console.log('Recipient BIK matches:', allBiks.map(m => m[1]));
+    if (allBiks.length > 0) result.bik = allBiks[allBiks.length - 1][1];
+    
+    console.log('Recipient extracted:', JSON.stringify(result));
+    return result;
+  }
+
+  private extractINN(text: string): string {
+    const match = text.match(/\b(\d{10,12})\b/);
+    return match ? match[1] : '';
+  }
+
+  private extractKPP(text: string): string {
+    const match = text.match(/\b(\d{9})\b/);
+    return match ? match[1] : '';
+  }
+
+  private extractBIK(text: string): string {
+    const match = text.match(/\b(\d{9})\b/);
+    return match ? match[1] : '';
+  }
+
+  private extractAccount(text: string): string {
+    const match = text.match(/(\d{20})/);
+    return match ? match[1] : '';
+  }
+
+  private extractBankName(text: string): string | null {
+    const match = text.match(/(?:ПАО\s+)?СБЕРБАНК[А-Яа-яЁё\s]*/i);
+    if (match) return match[0].trim();
+    
+    const ufkMatch = text.match(/УФК[А-Яа-яЁё\s]*/i);
+    if (ufkMatch) return ufkMatch[0].trim();
+    
+    return null;
+  }
+
+  private extractOrganizationName(text: string): string | null {
+    const lines = text.split('\n');
+    
+    for (const line of lines) {
+      const cleanLine = line.trim();
+      if (cleanLine.match(/^(?:инн|кпп|бик|банк|ч\.|$)/i)) continue;
+      
+      const words = cleanLine.split(/\s+/);
+      if (words.length >= 2 && words.length <= 4) {
+        const validWords = words.filter(w => /^[А-ЯЁ][а-яё]+$/.test(w));
+        if (validWords.length >= 2 && cleanLine.length > 8 && cleanLine.length < 60) {
+          return cleanLine;
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  private extractPaymentPurpose(text: string): string | null {
+    const lines = text.split('\n');
+    
+    // Ищем строку-метку "Получатель"
+    let recipientLineIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim().toLowerCase();
+      if (trimmed === 'получатель') {
+        recipientLineIndex = i;
+        break;
+      }
+    }
+    
+    // Ищем строку "Назначение платежа"
+    let purposeLineIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim().toLowerCase();
+      if (trimmed.startsWith('назначение платежа')) {
+        purposeLineIndex = i;
+        break;
+      }
+    }
+    
+    if (recipientLineIndex < 0 || purposeLineIndex < 0 || recipientLineIndex >= purposeLineIndex) {
+      console.log('Purpose: метки не найдены', { recipientLineIndex, purposeLineIndex });
+      return null;
+    }
+    
+    // Первый проход: найти первую строку с контентом (не пустую, не тире/черту)
+    for (let i = recipientLineIndex + 1; i < purposeLineIndex; i++) {
+      const trimmed = lines[i].trim();
+      
+      // Пропускаем пустые строки
+      if (!trimmed) continue;
+      
+      // Пропускаем строки из одних тире/черточек
+      if (/^[-_=—]+$/.test(trimmed)) continue;
+      
+      // Это назначение платежа
+      console.log('Found purpose:', trimmed);
+      return trimmed.substring(0, 500);
+    }
+    
+    return null;
+  }
+
+  private extractUIN(text: string): string | null {
+    const match = text.match(/уин[:\s]*(\d+)/i);
+    return match ? match[1] : null;
+  }
+
+  private extractQueue(text: string): string | null {
+    const match = text.match(/очередность[:\s]*(\d)/i);
+    return match ? match[1] : null;
+  }
+
+  async terminate(): Promise<void> {
+    if (this.worker) {
+      await this.worker.terminate();
+      this.worker = null;
+    }
+  }
+}
+
+export const ocrService = new OCRService();

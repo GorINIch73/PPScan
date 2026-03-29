@@ -1,0 +1,39 @@
+{
+  "name": "ppscan-app",
+  "version": "1.0.0",
+  "description": "Android app for scanning and recognizing bank payment order details",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "cap:init": "cap init",
+    "cap:add": "cap add android",
+    "cap:sync": "cap sync android",
+    "cap:build": "npm run build && cap sync android",
+    "cap:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/camera": "^6.0.0",
+    "@capacitor/cli": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/filesystem": "^6.0.0",
+    "@capacitor/share": "^6.0.0",
+    "@quasar/extras": "^1.16.15",
+    "dexie": "^4.0.0",
+    "pinia": "^2.2.0",
+    "quasar": "^2.17.0",
+    "tesseract.js": "^5.1.0",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@quasar/vite-plugin": "^1.8.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "@capacitor/android": "^6.0.0",
+    "sass-embedded": "^1.83.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vue-tsc": "^2.1.0"
+  }
+}
