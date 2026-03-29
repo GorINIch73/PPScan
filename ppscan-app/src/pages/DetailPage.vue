@@ -184,9 +184,14 @@ function formatDate(isoDate: string): string {
 
 async function markAsVerified(): Promise<void> {
   if (payment.value) {
-    await store.updatePayment(id.value, payment.value.fields, 'verified');
-    await store.loadPayment(id.value);
-    $q.notify({ type: 'positive', message: 'Поручение подтверждено' });
+    try {
+      const fieldsCopy = JSON.parse(JSON.stringify(payment.value.fields));
+      await store.updatePayment(id.value, fieldsCopy, 'verified');
+      $q.notify({ type: 'positive', message: 'Поручение подтверждено' });
+    } catch (error) {
+      console.error('markAsVerified error:', error);
+      $q.notify({ type: 'negative', message: 'Ошибка: ' + String(error) });
+    }
   }
 }
 
@@ -205,11 +210,17 @@ async function confirmDelete(): Promise<void> {
 
 async function exportSingle(): Promise<void> {
   if (payment.value) {
-    await exportService.exportAndDownload({
-      format: 'csv',
-      includeImage: false,
-      status: 'all'
-    });
+    try {
+      const message = await exportService.exportAndDownload({
+        format: 'csv',
+        includeImage: false,
+        status: 'all'
+      });
+      $q.notify({ type: 'positive', message });
+    } catch (error) {
+      console.error('Export error:', error);
+      $q.notify({ type: 'negative', message: 'Ошибка экспорта' });
+    }
   }
 }
 </script>

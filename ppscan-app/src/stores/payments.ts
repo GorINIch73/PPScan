@@ -83,6 +83,9 @@ export const usePaymentStore = defineStore('payments', () => {
   async function updatePayment(id: number, fields: PaymentFields, status?: 'pending' | 'verified'): Promise<void> {
     await db.updatePayment(id, fields, status);
     await loadPayments();
+    if (currentPayment.value?.id === id) {
+      currentPayment.value = await db.getPayment(id) || null;
+    }
   }
 
   async function deletePayment(id: number): Promise<void> {

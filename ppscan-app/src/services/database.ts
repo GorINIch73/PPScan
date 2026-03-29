@@ -31,7 +31,7 @@ export class PPScanDatabase extends Dexie {
   }
 
   async updatePayment(id: number, fields: PaymentFields, status?: 'pending' | 'verified'): Promise<void> {
-    const update: Partial<PaymentOrder> = { fields };
+    const update: Partial<PaymentOrder> = { fields: JSON.parse(JSON.stringify(fields)) };
     if (status) {
       update.status = status;
     }

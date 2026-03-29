@@ -227,11 +227,17 @@ async function openGallery(): Promise<void> {
 }
 
 async function handleExport(): Promise<void> {
-  await exportService.exportAndDownload({
-    format: 'csv',
-    includeImage: false,
-    status: exportStatus.value
-  });
+  try {
+    const message = await exportService.exportAndDownload({
+      format: 'csv',
+      includeImage: false,
+      status: exportStatus.value
+    });
+    $q.notify({ type: 'positive', message });
+  } catch (error) {
+    console.error('Export error:', error);
+    $q.notify({ type: 'negative', message: 'Ошибка экспорта' });
+  }
   showExportDialog.value = false;
 }
 

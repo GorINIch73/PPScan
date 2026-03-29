@@ -1,5 +1,8 @@
 import type { PaymentOrder, ExportOptions } from '@/types';
 import { db } from './database';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { Platform } from '@/utils/platform';
 
 export class ExportService {
   async exportToCSV(options: ExportOptions): Promise<string> {
@@ -27,7 +30,8 @@ export class ExportService {
       'БИК получателя',
       'Назначение платежа',
       'Очередность',
-      'УИН'
+      'УИН',
+      'RAW текст'
     ];
 
     const rows = payments.map(p => [
@@ -52,7 +56,8 @@ export class ExportService {
       p.fields.recipientBik,
       p.fields.paymentPurpose.replace(/"/g, '""'),
       p.fields.очередность,
-      p.fields.уин
+      p.fields.уин,
+      (p.rawText || '').replace(/"/g, '""').replace(/\n/g, ' ')
     ]);
 
     const csvContent = [
@@ -90,7 +95,34 @@ export class ExportService {
     return payments;
   }
 
-  downloadFile(content: string, filename: string, mimeType: string): void {
+  async exportAndDownload(options: ExportOptions): Promise<string> {
+    const csv = await this.exportToCSV(options);
+    const timestamp = new Date().toISOString().slice(0, 10);
+    const filename = `payments_${timestamp}.csv`;
+
+    if (Platform.isAndroid()) {
+      const base64 = btoa(unescape(encodeURIComponent(csv)));
+      const fileUri = await Filesystem.writeFile({
+        path: filename,
+        data: base64,
+        directory: Directory.Cache
+      });
+
+      await Share.share({
+        title: 'Экспорт платежей',
+        text: 'Платежные поручения',
+        url: fileUri.uri,
+        dialogTitle: 'Сохранить как CSV'
+      });
+
+      return `Экспорт завершён`;
+    } else {
+      this.downloadFile(csv, filename, 'text/csv;charset=utf-8');
+      return `Файл скачан: ${filename}`;
+    }
+  }
+
+  private downloadFile(content: string, filename: string, mimeType: string): void {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     
@@ -102,12 +134,6 @@ export class ExportService {
     document.body.removeChild(link);
     
     URL.revokeObjectURL(url);
-  }
-
-  async exportAndDownload(options: ExportOptions): Promise<void> {
-    const csv = await this.exportToCSV(options);
-    const timestamp = new Date().toISOString().slice(0, 10);
-    this.downloadFile(csv, `payments_${timestamp}.csv`, 'text/csv;charset=utf-8');
   }
 }
 
