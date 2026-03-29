@@ -21,7 +21,14 @@ export default defineConfig({
     }
   },
   build: {
-    target: 'esnext'
+    target: 'esnext',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'tesseract': ['tesseract.js']
+        }
+      }
+    }
   },
   optimizeDeps: {
     include: ['tesseract.js']

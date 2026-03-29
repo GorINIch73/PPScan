@@ -9,7 +9,17 @@
 
     <div class="q-pa-md">
       <div v-if="capturedImage && !ocrResult" class="preview-container">
-        <img :src="capturedImage" class="captured-image" alt="Снимок документа" />
+        <div class="row q-col-gutter-sm">
+          <div class="col-6">
+            <div class="text-subtitle2 q-mb-xs text-center">Оригинал</div>
+            <img :src="capturedImage" class="captured-image" alt="Оригинал" />
+          </div>
+          <div class="col-6">
+            <div class="text-subtitle2 q-mb-xs text-center">Обработанное</div>
+            <img :src="processedImage || capturedImage" class="captured-image" alt="Обработанное" />
+          </div>
+        </div>
+        
         <div class="q-mt-md row q-gutter-sm">
           <q-btn
             color="grey-7"
@@ -126,6 +136,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { useQuasar } from 'quasar';
 import { usePaymentStore } from '@/stores/payments';
 import { ocrService } from '@/services/ocr';
+import { preprocessImage } from '@/services/imageProcessor';
 import type { PaymentFields } from '@/types';
 import { emptyFields } from '@/types';
 
@@ -148,6 +159,9 @@ const $q = useQuasar();
 const store = usePaymentStore();
 
 const capturedImage = ref<string | null>(null);
+const processedImage = ref<string | null>(null);
+const documentDetected = ref(false);
+
 const isProcessing = ref(false);
 const progress = ref({ status: '', progress: 0 });
 const ocrResult = ref<{ text: string; confidence: number } | null>(null);
@@ -170,6 +184,11 @@ async function processImage(): Promise<void> {
 
     ocrResult.value = result;
     formFields.value = sanitizeFields(result.fields);
+    
+    if (result.processedImage) {
+      processedImage.value = result.processedImage;
+      documentDetected.value = result.processedImage !== capturedImage.value;
+    }
     
     console.log('========== OCR RESULT ==========');
     console.log('RAW TEXT:\n' + result.text);
@@ -217,7 +236,13 @@ onMounted(async () => {
     const imageParam = route.query.image as string;
     if (imageParam) {
       capturedImage.value = imageParam;
-      setTimeout(() => processImage(), 500);
+      ocrResult.value = null;
+      
+      progress.value = { status: 'Улучшение изображения...', progress: 5 };
+      processedImage.value = await preprocessImage(imageParam);
+      documentDetected.value = true;
+      
+      setTimeout(() => processImage(), 100);
     }
   } catch (error) {
     console.error('OCR init error:', error);
@@ -232,7 +257,7 @@ onMounted(async () => {
 
 .captured-image {
   max-width: 100%;
-  max-height: 400px;
+  max-height: 300px;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }

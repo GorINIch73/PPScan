@@ -5,6 +5,17 @@ import { Share } from '@capacitor/share';
 import { Platform } from '@/utils/platform';
 
 export class ExportService {
+  private cleanField(value: string | undefined | null): string {
+    if (value == null) return '';
+    return value
+      .replace(/\r\n/g, ' ')
+      .replace(/\r/g, ' ')
+      .replace(/\n/g, ' ')
+      .replace(/\t/g, ' ')
+      .replace(/"/g, '""')
+      .trim();
+  }
+
   async exportToCSV(options: ExportOptions): Promise<string> {
     const payments = await this.getFilteredPayments(options);
     
@@ -35,29 +46,29 @@ export class ExportService {
     ];
 
     const rows = payments.map(p => [
-      p.id?.toString() || '',
+      this.cleanField(p.id?.toString()),
       this.formatDate(p.createdAt),
       p.status === 'verified' ? 'Проверено' : 'На проверке',
-      p.fields.number,
-      p.fields.date,
-      p.fields.amount,
-      p.fields.amountRub,
-      p.fields.payer,
-      p.fields.payerInn,
-      p.fields.payerKpp,
-      p.fields.payerBank,
-      p.fields.payerAccount,
-      p.fields.payerBik,
-      p.fields.recipient,
-      p.fields.recipientInn,
-      p.fields.recipientKpp,
-      p.fields.recipientBank,
-      p.fields.recipientAccount,
-      p.fields.recipientBik,
-      p.fields.paymentPurpose.replace(/"/g, '""'),
-      p.fields.очередность,
-      p.fields.уин,
-      (p.rawText || '').replace(/"/g, '""').replace(/\n/g, ' ')
+      this.cleanField(p.fields.number),
+      this.cleanField(p.fields.date),
+      this.cleanField(p.fields.amount),
+      this.cleanField(p.fields.amountRub),
+      this.cleanField(p.fields.payer),
+      this.cleanField(p.fields.payerInn),
+      this.cleanField(p.fields.payerKpp),
+      this.cleanField(p.fields.payerBank),
+      this.cleanField(p.fields.payerAccount),
+      this.cleanField(p.fields.payerBik),
+      this.cleanField(p.fields.recipient),
+      this.cleanField(p.fields.recipientInn),
+      this.cleanField(p.fields.recipientKpp),
+      this.cleanField(p.fields.recipientBank),
+      this.cleanField(p.fields.recipientAccount),
+      this.cleanField(p.fields.recipientBik),
+      this.cleanField(p.fields.paymentPurpose),
+      this.cleanField(p.fields.очередность),
+      this.cleanField(p.fields.уин),
+      this.cleanField(p.rawText || '')
     ]);
 
     const csvContent = [
@@ -97,7 +108,7 @@ export class ExportService {
 
   async exportAndDownload(options: ExportOptions): Promise<string> {
     const csv = await this.exportToCSV(options);
-    const timestamp = new Date().toISOString().slice(0, 10);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const filename = `payments_${timestamp}.csv`;
 
     if (Platform.isAndroid()) {
@@ -105,17 +116,10 @@ export class ExportService {
       const fileUri = await Filesystem.writeFile({
         path: filename,
         data: base64,
-        directory: Directory.Cache
+        directory: Directory.Documents
       });
 
-      await Share.share({
-        title: 'Экспорт платежей',
-        text: 'Платежные поручения',
-        url: fileUri.uri,
-        dialogTitle: 'Сохранить как CSV'
-      });
-
-      return `Экспорт завершён`;
+      return `Файл сохранён: ${fileUri.uri}`;
     } else {
       this.downloadFile(csv, filename, 'text/csv;charset=utf-8');
       return `Файл скачан: ${filename}`;

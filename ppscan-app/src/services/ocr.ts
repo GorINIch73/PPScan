@@ -1,6 +1,7 @@
 import Tesseract from 'tesseract.js';
 import type { PaymentFields } from '@/types';
 import { emptyFields } from '@/types';
+import { preprocessImage as advancedPreprocess, detectDocument } from './imageProcessor';
 
 export interface OCRProgress {
   status: string;
@@ -21,7 +22,7 @@ export class OCRService {
   async recognize(
     imageData: string,
     onProgress?: (progress: OCRProgress) => void
-  ): Promise<{ text: string; confidence: number; fields: Partial<PaymentFields> }> {
+  ): Promise<{ text: string; confidence: number; fields: Partial<PaymentFields>; processedImage?: string }> {
     if (!this.worker) {
       await this.initialize();
     }
@@ -43,10 +44,25 @@ export class OCRService {
 
     const fields = this.extractFields(text);
 
-    return { text, confidence, fields };
+    return { text, confidence, fields, processedImage };
   }
 
   private async preprocessImage(imageData: string): Promise<string> {
+    try {
+      console.log('Starting advanced image preprocessing...');
+      const startTime = Date.now();
+      
+      const result = await advancedPreprocess(imageData);
+      
+      console.log(`Preprocessing done in ${Date.now() - startTime}ms`);
+      return result;
+    } catch (err) {
+      console.error('Advanced preprocessing failed, using basic:', err);
+      return this.basicPreprocess(imageData);
+    }
+  }
+  
+  private basicPreprocess(imageData: string): Promise<string> {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
@@ -120,7 +136,6 @@ export class OCRService {
     fields.date = this.extractDate(cleanedText) || '';
     fields.amount = this.extractAmount(cleanedText) || '';
     fields.amountRub = this.extractAmountWords(cleanedText) || '';
-    fields.paymentPurpose = this.extractPaymentPurpose(text) || '';
     fields.уин = this.extractUIN(cleanedText) || '';
     fields.очередность = this.extractQueue(cleanedText) || '';
 
@@ -142,8 +157,12 @@ export class OCRService {
     fields.recipientBank = recipientData.bank;
     fields.recipientBik = recipientData.bik;
 
+    // Назначение платежа - ищем между "Получатель" и "Назначение платежа"
+    fields.paymentPurpose = this.extractPaymentPurpose(text) || '';
+
     console.log('Payer:', JSON.stringify(payerData));
     console.log('Recipient:', JSON.stringify(recipientData));
+    console.log('Payment purpose:', fields.paymentPurpose);
 
     return fields;
   }
@@ -292,14 +311,19 @@ export class OCRService {
     const oooMatch = beforePayer.match(/ооо[^\w"]*"([^"]+)"/i);
     if (oooMatch) result.name = 'ООО "' + oooMatch[1].trim() + '"';
     
-    // АО, ЗАО
+    // АО, ЗАО - ищем в beforePayer и betweenSections
+    const searchArea = beforePayer + ' ' + betweenSections;
     if (!result.name) {
-      const aoMatch = beforePayer.match(/зао[^\w"]*"([^"]+)"/i);
+      const aoMatch = searchArea.match(/зао[^\w"]*"([^"]+)"/i);
       if (aoMatch) result.name = 'ЗАО "' + aoMatch[1].trim() + '"';
     }
     if (!result.name) {
-      const aoMatch = beforePayer.match(/ао[^\w"]*"([^"]+)"/i);
+      const aoMatch = searchArea.match(/ао[^\w"]*"([^"]+)"/i);
       if (aoMatch) result.name = 'АО "' + aoMatch[1].trim() + '"';
+    }
+    if (!result.name) {
+      const oooMatch = searchArea.match(/ооо[^\w"]*"([^"]+)"/i);
+      if (oooMatch) result.name = 'ООО "' + oooMatch[1].trim() + '"';
     }
     
     // Счёт (с учётом OCR-артефактов)
@@ -361,9 +385,9 @@ export class OCRService {
         result.name = 'ООО "' + oooMatch[1].trim() + '"';
       }
       
-      // ООО без кавычек или с неправильными
+      // ООО без кавычек или с неправильными (ограничиваем до 30 символов)
       if (!result.name) {
-        const oooSimple = afterBank.match(/ооо["\s]*([А-ЯЁа-яё][^"\n]{2,50})/i);
+        const oooSimple = afterBank.match(/ооо["\s]*([А-ЯЁа-яё][^"\n]{2,30})/i);
         if (oooSimple) {
           result.name = 'ООО "' + oooSimple[1].trim().replace(/["\s]+$/, '') + '"';
         }
@@ -371,14 +395,16 @@ export class OCRService {
       
       // Полное название ООО (Общество с ограниченной ответственностью)
       if (!result.name) {
-        const fullOooMatch = afterBank.match(/общен?ство\s+с\s+ограниченной\s+ответственностью\s*\n?\s*"([^"]+)"/i);
+        // Ищем "Общество с ограниченной ответственностью" и затем название в кавычках
+        const fullOooMatch = afterBank.match(/общен?ство\s+с\s+ограниченной\s+ответственностью[\s\S]{0,100}"([^"]{2,50})"/i);
         if (fullOooMatch) {
           result.name = 'ООО "' + fullOooMatch[1].trim() + '"';
+          console.log('Found full OOO name:', result.name);
         }
       }
       
-      // ИП
-      const ipMatch = afterBank.match(/индивидуальный\s+предприниматель\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){2,})/i);
+      // ИП (ограничиваем до 3 слов ФИО)
+      const ipMatch = afterBank.match(/индивидуальный\s+предприниматель\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})/i);
       if (ipMatch) {
         result.name = 'ИП ' + ipMatch[1].trim();
       }
@@ -452,60 +478,86 @@ export class OCRService {
 
   private extractPaymentPurpose(text: string): string | null {
     const lines = text.split('\n');
+    const lowerLines = lines.map(l => l.toLowerCase());
     
     console.log('Purpose: total lines =', lines.length);
     
-    // Ищем строку-метку "Получатель" с учётом OCR-искажений
-    let recipientLineIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim().toLowerCase();
-      if (/^получ/.test(trimmed) && trimmed.length < 20) {
-        recipientLineIndex = i;
-        console.log('Purpose: found recipient label at line', i, ':', trimmed);
-        break;
+    // МЕТОД 1 (самый надёжный): между "Получатель" и "Назначение платежа"
+    const startIdx = lowerLines.findIndex(l => /^получатель$/.test(l.trim()));
+    const endIdx = lowerLines.findIndex(l => l.includes('назначение платежа'));
+    if (startIdx >= 0 && endIdx > startIdx) {
+      const purposeLines: string[] = [];
+      for (let i = startIdx + 1; i < endIdx; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.length < 3) continue;
+        if (/^[-_=—]+$/.test(trimmed)) continue;
+        if (/^(вид\s*оп|очеред|инн|кпп|бик|банк|сч|уин)/i.test(trimmed)) continue;
+        purposeLines.push(trimmed);
+      }
+      if (purposeLines.length > 0) {
+        const result = purposeLines.join(' ').substring(0, 500);
+        console.log('Purpose method 1: between markers, found:', result.substring(0, 100));
+        return result;
       }
     }
     
-    // Ищем строку "Назначение платежа"
-    let purposeLineIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim().toLowerCase();
-      if (trimmed.startsWith('назначение платежа') || trimmed.startsWith('назначение')) {
-        purposeLineIndex = i;
-        console.log('Purpose: found label at line', i, ':', trimmed);
-        break;
+    // МЕТОД 2: до "Назначение платежа" (до 5 строк)
+    const purposeLabelIndex = lowerLines.findIndex(l => l.includes('назначение платежа'));
+    if (purposeLabelIndex >= 0) {
+      const purposeLines: string[] = [];
+      for (let i = purposeLabelIndex - 5; i < purposeLabelIndex; i++) {
+        if (i < 0) continue;
+        const trimmed = lines[i].trim();
+        if (!trimmed || trimmed.length < 3) continue;
+        if (/^[-_=—]+$/.test(trimmed)) continue;
+        if (/^(вид\s*оп|очеред|инн|кпп|бик|банк|сч|уин)/i.test(trimmed)) continue;
+        purposeLines.push(trimmed);
+      }
+      if (purposeLines.length > 0) {
+        const result = purposeLines.join(' ').substring(0, 500);
+        console.log('Purpose method 2: before label, found:', result.substring(0, 100));
+        return result;
       }
     }
     
-    let purposeLines: string[] = [];
+    // МЕТОД 3 (менее надёжный): строки с типичными словами назначения
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (/^(оплат[ае]|перечисл|возврат|взнос|поступлен|задолжен|аванс|оплата\s+за)/i.test(trimmed)) {
+        console.log('Purpose method 3: typical words, found:', trimmed.substring(0, 100));
+        return trimmed.substring(0, 500);
+      }
+    }
     
-    // Если нашли обе метки - стандартный путь
-    if (recipientLineIndex >= 0 && purposeLineIndex > recipientLineIndex) {
-      for (let i = recipientLineIndex + 1; i < purposeLineIndex; i++) {
-        const trimmed = lines[i].trim();
-        if (!trimmed) continue;
-        if (/^[-_=—]+$/.test(trimmed)) continue;
-        purposeLines.push(trimmed);
-      }
-    } else if (purposeLineIndex >= 0) {
-      // Нет метки "Получатель" - берём строки перед "Назначение платежа"
-      const startSearch = Math.max(0, purposeLineIndex - 5);
-      for (let i = startSearch; i < purposeLineIndex; i++) {
-        const trimmed = lines[i].trim();
-        if (!trimmed) continue;
-        if (/^[-_=—]+$/.test(trimmed)) continue;
-        // Пропускаем очевидно не-цель
-        if (/^(очеред|уин|инн|кпп|бик|банк)/i.test(trimmed)) continue;
-        purposeLines.push(trimmed);
-      }
+    // МЕТОД 4 (fallback): после наименования
+    const result = this.extractPurposeAfterName(text);
+    if (result) {
+      console.log('Purpose method 4: after name, found:', result.substring(0, 100));
+      return result;
+    }
+    
+    console.log('Purpose: no method worked');
+    return null;
+  }
+
+  private extractPurposeAfterName(text: string): string | null {
+    const lines = text.split('\n');
+    const purposeLines: string[] = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (!trimmed || trimmed.length < 3) continue;
+      if (/^[-_=—]+$/.test(trimmed)) continue;
+      if (/^(инн|кпп|бик|банк|сч|очеред|уин|вид\s*оп)/i.test(trimmed)) break;
+      if (/^(подпис|отметк|банк)/i.test(trimmed)) break;
+      
+      purposeLines.push(trimmed);
+      if (purposeLines.length >= 10) break;
     }
     
     if (purposeLines.length > 0) {
-      const purpose = purposeLines.join(' ').substring(0, 500);
-      console.log('Found purpose:', purpose);
-      return purpose;
+      return purposeLines.join(' ').substring(0, 500);
     }
-    
     return null;
   }
 
